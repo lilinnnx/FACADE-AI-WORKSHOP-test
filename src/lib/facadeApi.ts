@@ -129,6 +129,10 @@ function drawToDataUrl(
     height = Math.round(height * up)
   }
 
+  if (Math.max(width, height) > 5000) {
+    throw new Error('图片宽高比过于极端，请裁剪后再试')
+  }
+
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
@@ -148,35 +152,71 @@ function drawToDataUrl(
 }
 
 /**
- * 压到长边 1600，JPEG 0.85；如果 base64 仍然太大，自动降级重压。
+ * 压到长边 1280，JPEG 0.75；如果 base64 仍然太大，自动降级重压。
+ * 之前 1600px 会把 POST 拖到 9 秒以上，所以降到 1280。
  */
 export async function compressImage(file: File): Promise<CompressedImage> {
   const img = await loadImage(file)
 
   const attempts = [
-    { maxSide: 1600, quality: 0.85 },
-    { maxSide: 1400, quality: 0.8 },
-    { maxSide: 1200, quality: 0.72 },
+    { maxSide: 1280, quality: 0.75 },
+    { maxSide: 1152, quality: 0.7 },
+    { maxSide: 1024, quality: 0.65 },
+    { maxSide: 896, quality: 0.6 },
+    { maxSide: 800, quality: 0.55 },
   ]
+
+  // 约 1.05 MB 二进制；POST 在 Netlify 上才能在 2-3 秒内提交完
+  const MAX_DATA_URL_CHARS = 1400000
 
   let last: CompressedImage | null = null
   for (const attempt of attempts) {
     last = drawToDataUrl(img, attempt.maxSide, attempt.quality)
-    if (last.dataUrl.length <= 4300000) return last
+    if (last.dataUrl.length <= MAX_DATA_URL_CHARS) return last
   }
 
   if (!last) throw new Error('图片压缩失败')
-  return last
+  throw new Error('图片压缩后仍然过大，请换一张尺寸更小的照片')
 }
 
 async function readJson(response: Response): Promise<any> {
   const text = await response.text()
-  if (!text) return {}
+
+  if (!text) {
+    return {
+      ok: false,
+      error: {
+        code: 'empty_response',
+        message: `接口返回空响应（HTTP ${response.status}）`,
+      },
+    }
+  }
+
   try {
     return JSON.parse(text)
   } catch {
-    return { error: { message: text.slice(0, 200) } }
+    return {
+      ok: false,
+      error: {
+        code: 'invalid_response',
+        message: `接口返回非 JSON（HTTP ${response.status}）：${text.slice(0, 160)}`,
+      },
+    }
   }
+}
+
+function apiError(json: any, status: number): Error {
+  const detail = json && json.error
+
+  if (detail) {
+    const parts: string[] = [detail.message || detail.code || '接口错误']
+    if (detail.code && detail.message) parts.push(`(${detail.code})`)
+    if (detail.stage) parts.push(`阶段：${detail.stage}`)
+    if (detail.upstream_status) parts.push(`上游 HTTP ${detail.upstream_status}`)
+    return new Error(parts.join(' · '))
+  }
+
+  return new Error(`接口请求失败（HTTP ${status}）`)
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -205,6 +245,16 @@ const POLL_INTERVAL_MS = 3000
 const POLL_MAX_ATTEMPTS = 60 // 3 分钟
 
 /**
+ * 健康检查：浏览器直接访问 /api/proxy?health=1 也能看
+ */
+export async function checkProxyHealth(): Promise<any> {
+  const response = await fetch(`${API_BASE}?health=1`)
+  const json = await readJson(response)
+  if (!response.ok || json.ok === false) throw apiError(json, response.status)
+  return json
+}
+
+/**
  * 完整生成流程：查字典 → 压缩图片 → POST 创建任务 → GET 轮询
  */
 export async function generateFacade(
@@ -225,24 +275,42 @@ export async function generateFacade(
   const image = await compressImage(input.file)
 
   onStage?.({ stage: 'create' })
-  const createResponse = await fetch(API_BASE, {
-    method: 'POST',
-    headers: requestHeaders(),
-    body: JSON.stringify({
-      image_base64: image.dataUrl,
-      prompt: entry.prompt,
-      negative_prompt: entry.negative_prompt || '',
-      width: image.width,
-      height: image.height,
-    }),
-    signal,
-  })
+
+  const createController = new AbortController()
+  const onAbort = () => createController.abort()
+  if (signal) {
+    if (signal.aborted) createController.abort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
+  const createTimer = setTimeout(() => createController.abort(), 20000)
+
+  let createResponse: Response
+  try {
+    createResponse = await fetch(API_BASE, {
+      method: 'POST',
+      headers: requestHeaders(),
+      body: JSON.stringify({
+        image_base64: image.dataUrl,
+        prompt: entry.prompt,
+        negative_prompt: entry.negative_prompt || '',
+        width: image.width,
+        height: image.height,
+      }),
+      signal: createController.signal,
+    })
+  } catch (error) {
+    const isAbort = error instanceof DOMException && error.name === 'AbortError'
+    throw new Error(
+      isAbort ? '提交任务超时（20 秒），请重试' : '网络错误，提交任务失败',
+    )
+  } finally {
+    clearTimeout(createTimer)
+    if (signal) signal.removeEventListener('abort', onAbort)
+  }
 
   const createJson = await readJson(createResponse)
-  if (!createResponse.ok) {
-    throw new Error(
-      createJson?.error?.message || `创建任务失败（HTTP ${createResponse.status}）`,
-    )
+  if (!createResponse.ok || createJson?.ok === false || createJson?.error) {
+    throw apiError(createJson, createResponse.status)
   }
 
   const taskId: string | undefined = createJson.task_id
@@ -258,10 +326,8 @@ export async function generateFacade(
     )
 
     const queryJson = await readJson(queryResponse)
-    if (!queryResponse.ok) {
-      throw new Error(
-        queryJson?.error?.message || `查询任务失败（HTTP ${queryResponse.status}）`,
-      )
+    if (!queryResponse.ok || queryJson?.ok === false || queryJson?.error) {
+      throw apiError(queryJson, queryResponse.status)
     }
 
     const status = String(queryJson.status || '').toUpperCase()
