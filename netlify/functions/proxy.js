@@ -6,7 +6,7 @@ const DEFAULT_BASE = "https://dashscope.aliyuncs.com/api/v1";
 const DEFAULT_MODEL = "wan2.5-i2i-preview";
 const MAX_BODY_CHARS = 2000000; // 约 2 MB base64，压到这里 POST 才能在 2-3 秒内完成
 const MAX_IMAGE_BYTES = 1.5 * 1024 * 1024;
-const REQUEST_TIMEOUT_MS = 5000; // 单次提交/查询最多 5 秒，留出 Netlify 10 秒余量
+const REQUEST_TIMEOUT_MS = 7000; // 单次提交/查询最多 7 秒，留出 Netlify 10 秒余量
 
 function headersFor(event) {
   const allowed = String(process.env.ALLOWED_ORIGIN || "")
@@ -266,7 +266,7 @@ async function createTask(event, apiKey, base, model) {
     return handledError(
       event,
       isTimeout ? "submit_timeout" : "submit_unreachable",
-      isTimeout ? "提交万相任务超时（5 秒）" : "无法连接万相接口",
+      isTimeout ? "提交万相任务超时（7 秒）" : "无法连接万相接口",
       { stage: "submit", error_name: (error && error.name) || "Error" }
     );
   }
@@ -313,7 +313,7 @@ async function queryTask(event, apiKey, base) {
     return handledError(
       event,
       isTimeout ? "query_timeout" : "query_unreachable",
-      isTimeout ? "查询万相任务超时（5 秒）" : "无法连接万相接口",
+      isTimeout ? "查询万相任务超时（7 秒）" : "无法连接万相接口",
       { stage: "query", error_name: (error && error.name) || "Error" }
     );
   }

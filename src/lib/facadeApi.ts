@@ -152,22 +152,21 @@ function drawToDataUrl(
 }
 
 /**
- * 压到长边 1280，JPEG 0.75；如果 base64 仍然太大，自动降级重压。
- * 之前 1600px 会把 POST 拖到 9 秒以上，所以降到 1280。
+ * 压到长边 1024，JPEG 0.7；如果 base64 仍然太大，自动降级重压。
+ * 1024 足够喂给万相，体积通常只有几百 KB，POST 会快很多。
  */
 export async function compressImage(file: File): Promise<CompressedImage> {
   const img = await loadImage(file)
 
   const attempts = [
-    { maxSide: 1280, quality: 0.75 },
-    { maxSide: 1152, quality: 0.7 },
-    { maxSide: 1024, quality: 0.65 },
+    { maxSide: 1024, quality: 0.7 },
+    { maxSide: 960, quality: 0.65 },
     { maxSide: 896, quality: 0.6 },
     { maxSide: 800, quality: 0.55 },
   ]
 
-  // 约 1.05 MB 二进制；POST 在 Netlify 上才能在 2-3 秒内提交完
-  const MAX_DATA_URL_CHARS = 1400000
+  // 约 0.9 MB 二进制；POST 在 Netlify 上才能在 2-3 秒内提交完
+  const MAX_DATA_URL_CHARS = 1200000
 
   let last: CompressedImage | null = null
   for (const attempt of attempts) {
@@ -282,7 +281,7 @@ export async function generateFacade(
     if (signal.aborted) createController.abort()
     else signal.addEventListener('abort', onAbort, { once: true })
   }
-  const createTimer = setTimeout(() => createController.abort(), 20000)
+  const createTimer = setTimeout(() => createController.abort(), 30000)
 
   let createResponse: Response
   try {
@@ -301,7 +300,7 @@ export async function generateFacade(
   } catch (error) {
     const isAbort = error instanceof DOMException && error.name === 'AbortError'
     throw new Error(
-      isAbort ? '提交任务超时（20 秒），请重试' : '网络错误，提交任务失败',
+      isAbort ? '提交任务超时（30 秒），请重试' : '网络错误，提交任务失败',
     )
   } finally {
     clearTimeout(createTimer)
