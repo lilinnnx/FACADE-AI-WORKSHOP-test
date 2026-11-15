@@ -281,7 +281,7 @@ export async function generateFacade(
     if (signal.aborted) createController.abort()
     else signal.addEventListener('abort', onAbort, { once: true })
   }
-  const createTimer = setTimeout(() => createController.abort(), 30000)
+  const createTimer = setTimeout(() => createController.abort(), 60000)
 
   let createResponse: Response
   try {
@@ -300,7 +300,7 @@ export async function generateFacade(
   } catch (error) {
     const isAbort = error instanceof DOMException && error.name === 'AbortError'
     throw new Error(
-      isAbort ? '提交任务超时（30 秒），请重试' : '网络错误，提交任务失败',
+      isAbort ? '提交任务超时（60 秒），请重试' : '网络错误，提交任务失败',
     )
   } finally {
     clearTimeout(createTimer)
